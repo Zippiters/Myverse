@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MangaVerse — Live (MangaDex)</title>
+  <link rel="preconnect" href="https://uploads.mangadex.org" crossorigin>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="container top-inner">
+    <div class="brand">
+      <div class="logo">MV</div>
+      <div>
+        <h1>MangaVerse</h1>
+        <small>Read. Browse. Bookmark.</small>
+      </div>
+    </div>
+
+    <div class="top-actions">
+      <div class="search" role="search">
+        <input id="searchInput" placeholder="Search titles, e.g. Crimson Reset" aria-label="search">
+        <button id="searchBtn" title="Search">🔍</button>
+      </div>
+
+      <div style="display:flex;gap:10px;align-items:center">
+        <button id="themeToggle" class="icon-btn" title="Toggle theme">🌓</button>
+        <button class="login-btn" id="openLogin">Login</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <div class="main-grid">
+    <section class="content">
+      <div class="hero">
+        <div class="hero-left">
+          <div class="hero-card" aria-live="polite">
+            <div class="hero-details">
+              <div class="rating" id="heroRating">★</div>
+              <h2 id="heroTitle">LOADING...</h2>
+              <div class="meta" id="heroMeta">Type • Genres</div>
+              <p class="summary" id="heroSummary">Loading description…</p>
+              <div class="hero-actions">
+                <button class="btn primary" id="readHero">Read</button>
+                <button class="btn ghost" id="bookmarkHero">+ Bookmark</button>
+              </div>
+            </div>
+            <div class="hero-cover">
+              <img id="heroCover" src="" alt="featured cover">
+            </div>
+          </div>
+
+          <div class="carousel-dots" id="carouselDots" aria-hidden="true"></div>
+        </div>
+
+        <aside class="sidebar">
+          <div class="panel popular-panel">
+            <h3>Popular</h3>
+            <div id="popularList" class="popular-list">Loading…</div>
+            <a class="view-all" id="viewAllBtn">View all →</a>
+          </div>
+        </aside>
+      </div>
+
+      <section class="section">
+        <h3>Popular Today</h3>
+        <div class="horizontal-scroll" id="popularToday">Loading…</div>
+      </section>
+
+      <section class="section">
+        <h3>Latest Releases</h3>
+        <div class="grid" id="latestGrid">Loading…</div>
+      </section>
+    </section>
+
+    <aside class="right-rail">
+      <div class="panel rank-panel">
+        <h4>Top Weekly</h4>
+        <ol id="rankList" class="rank-list">Loading…</ol>
+      </div>
+
+      <div class="panel">
+        <h4>Bookmarks</h4>
+        <div id="bookmarkList" class="bookmark-list"><small>No bookmarks yet.</small></div>
+      </div>
+
+      <div class="panel">
+        <h4>About</h4>
+        <p class="small">This demo loads metadata & covers from MangaDex and shows chapter pages using MangaDex's at-home endpoint. It does not host copyrighted content.</p>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<footer class="site-foot container">© MangaVerse demo • MangaDex API</footer>
+
+<!-- Reader Modal -->
+<div id="readerModal" class="modal" aria-hidden="true">
+  <div class="modal-sheet">
+    <div class="modal-toolbar">
+      <div>
+        <button id="prevChap" class="btn small">◀ Prev</button>
+        <button id="nextChap" class="btn small">Next ▶</button>
+      </div>
+      <div>
+        <button id="closeReader" class="btn small ghost">Close ✕</button>
+      </div>
+    </div>
+    <div class="modal-body" id="readerBody">
+      <div id="readerLoading" class="loader">Loading chapter…</div>
+      <div id="readerPages" class="reader-pages"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Login Modal (mock) -->
+<div id="loginModal" class="modal" aria-hidden="true">
+  <div class="modal-sheet small-sheet">
+    <div class="modal-toolbar"><h3>Login</h3><button id="closeLogin" class="btn small ghost">✕</button></div>
+    <div class="modal-body">
+      <form id="loginForm">
+        <label>Username</label>
+        <input type="text" id="loginUser" required>
+        <label>Password</label>
+        <input type="password" id="loginPass" required>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn primary" type="submit">Sign in</button>
+          <button type="button" class="btn ghost" id="loginCancel">Cancel</button>
+        </div>
+        <div id="loginMsg" style="margin-top:10px;color:var(--muted)"></div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Loading overlay for whole page -->
+<div id="globalLoader" class="global-loader hidden"><div class="spinner"></div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
