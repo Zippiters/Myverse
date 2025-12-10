@@ -1,561 +1,463 @@
-/* app.live.js - MangaVerse (Live MangaDex API version)
-   Uses MangaDex API for real manga, chapters, and pages.
-   IMPORTANT: Browsers are usually blocked by MangaDex CORS policy.
-   Configure CORS_PROXY below if you need cross-origin forwarding.
+/* app.js - MangaDex front-end with reader, bookmarks, loader, theme toggle, login modal (mock)
+    Place this file alongside index.html & style.css and open index.html locally.
 */
-
-/* ---------- CONFIG ---------- */
-// If you have a CORS proxy, put it here (include trailing slash).
-// Example: 'https://your-cors-proxy.example.com/'
-// Leave empty string '' to attempt direct calls (likely blocked by CORS).
-const CORS_PROXY = ''; 
 
 const API_BASE = 'https://api.mangadex.org';
-const UPLOADS_BASE = 'https://uploads.mangadex.org/covers';
-const BOOKMARK_KEY = 'mangaverse_bookmarks';
-const THEME_KEY = 'mangaverse_theme';
-const PLACEHOLDER = (w,h,text='No+Cover') => `https://via.placeholder.com/${w}x${h}.png?text=${encodeURIComponent(text)}`;
+const UPLOADS_BASE = 'https://uploads.mangadex.org/covers'; // /{mangaId}/{fileName}
+
+// ==============================================================================
+// 🛑 CRITICAL FIX: CORS PROXY IMPLEMENTATION (SIMPLIFIED)
+// Using a simple prefix to route all external requests through the proxy.
+const PROXY_URL = 'https://corsproxy.io/?'; 
+// ==============================================================================
 
 /* ---------- Helpers ---------- */
-const qs = s => document.querySelector(s);
-const qsa = s => Array.from(document.querySelectorAll(s));
-function safeFetch(url, opts) {
-  // Prefix with CORS proxy if provided
-  const finalUrl = (CORS_PROXY || '') + url;
-  return fetch(finalUrl, opts);
+function getTitle(attrs){
+  if(!attrs) return 'No Title';
+  if(attrs.title){
+    if(attrs.title.en) return attrs.title.en;
+    return Object.values(attrs.title)[0] || 'Untitled';
+  }
+  return 'Untitled';
 }
-function escapeHtml(s){ if (!s && s !== 0) return ''; return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-function truncate(s,n){ if(!s) return ''; return s.length>n? s.slice(0,n-1)+'…': s; }
 
-/* ---------- UI elements (safe fallbacks) ---------- */
-const globalLoader = qs('#globalLoader') || document.createElement('div');
-if(!globalLoader.id) globalLoader.id = 'globalLoader';
-const heroTitle = qs('#heroTitle') || null;
-const featuredWrap = qs('#featuredCarousel') || document.createElement('div');
-const featuredDots = qs('#featuredDots') || document.createElement('div');
+// 🛑 MODIFIED: coverFromRel to use simple PROXY_URL prefix for images
+function coverFromRel(m){
+  const rel = (m.relationships || []).find(r => r.type === 'cover_art');
+  const fileName = rel?.attributes?.fileName;
+  
+  if (fileName) {
+    // Prepend the PROXY_URL to the original uploads URL
+    return `${PROXY_URL}${UPLOADS_BASE}/${m.id}/${fileName}`; 
+  } else {
+    return placeholder(220,320);
+  }
+}
+function mdTitleUrl(id){ return `https://mangadex.org/title/${id}`; }
+function placeholder(w,h){ return `https://via.placeholder.com/${w}x${h}.png?text=No+Cover`; }
+function qs(sel){ return document.querySelector(sel); }
+function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
 
-const popularList = qs('#popularList') || document.createElement('div');
-const popularToday = qs('#popularToday') || document.createElement('div');
-const latestGrid = qs('#latestGrid') || document.createElement('div');
-const rankList = qs('#rankList') || document.createElement('div');
+/* ---------- UI Elements ---------- */
+const heroTitle = qs('#heroTitle');
+const heroSummary = qs('#heroSummary');
+const heroMeta = qs('#heroMeta');
+const heroCover = qs('#heroCover');
+const heroRating = qs('#heroRating');
 
-const searchInput = qs('#searchInput') || null;
-const searchButton = qs('#searchButton') || null;
-const searchResults = qs('#searchResults') || document.createElement('div');
+const popularList = qs('#popularList');
+const popularToday = qs('#popularToday');
+const latestGrid = qs('#latestGrid');
+const rankList = qs('#rankList');
+const carouselDots = qs('#carouselDots');
 
-const readerModal = qs('#readerModal') || document.createElement('div');
-const readerTitle = qs('#readerTitle') || document.createElement('div');
-const readerPages = qs('#readerPages') || document.createElement('div');
-const readerClose = qs('#readerClose') || null;
+const readerModal = qs('#readerModal');
+const readerPages = qs('#readerPages');
+const readerLoading = qs('#readerLoading');
+const prevChapBtn = qs('#prevChap');
+const nextChapBtn = qs('#nextChap');
+const closeReaderBtn = qs('#closeReader');
 
-const bookmarksList = qs('#bookmarksList') || document.createElement('div');
+const bookmarkListNode = qs('#bookmarkList');
+const bookmarkHeroBtn = qs('#bookmarkHero');
 
-const themeToggle = qs('#themeToggle') || null;
+const searchInput = qs('#searchInput');
+const searchBtn = qs('#searchBtn');
+
+const themeToggle = qs('#themeToggle');
+const globalLoader = qs('#globalLoader');
+
+const loginModal = qs('#loginModal');
+const openLoginBtn = qs('#openLogin');
+const closeLoginBtn = qs('#closeLogin');
+const loginForm = qs('#loginForm');
+const loginMsg = qs('#loginMsg');
 
 /* ---------- State ---------- */
-let state = {
-  featuredIndex: 0,
-  bookmarks: loadBookmarks(),
-  chaptersCache: {}, // mangaId => chapters
-  atHomeCache: {},   // chapterId => at-home data (baseUrl & pages)
+let featuredList = [];
+let currentFeaturedIndex = 0;
+let currentReader = {
+  mangaId: null,
+  chapterIndex: null, // index in chapters array
+  chapters: [],       // list of chapters for current manga
+  pages: [],          // list of page file names for current chapter
+  baseUrl: null       // at-home server baseURL
 };
 
-/* ---------- Persistence ---------- */
-function loadBookmarks() {
-  try {
-    const raw = localStorage.getItem(BOOKMARK_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch (e) { console.warn('loadBookmarks error', e); return []; }
-}
-function saveBookmarks(){ try{ localStorage.setItem(BOOKMARK_KEY, JSON.stringify(state.bookmarks)); }catch(e){console.warn('saveBookmarks',e);} }
+/* ---------- Utilities: API calls (MODIFIED FOR PROXY) ---------- */
 
-/* ---------- Theme ---------- */
-function loadTheme() {
-  try {
-    const t = localStorage.getItem(THEME_KEY);
-    if (t === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  } catch(e){}
-}
-function toggleTheme(){
-  const isDark = document.documentElement.classList.toggle('dark');
-  localStorage.setItem(THEME_KEY, isDark ? 'dark' : 'light');
-}
-
-/* ---------- Cover helper ---------- */
-function getTitle(attrs){
-  if(!attrs) return 'No Title';
-  if(attrs.title){
-    if(attrs.title.en) return attrs.title.en;
-    return Object.values(attrs.title)[0] || 'Untitled';
-  }
-  return 'Untitled';
-}
-function coverFromRel(m){
-  const rel = (m.relationships || []).find(r => r.type === 'cover_art');
-  const fileName = rel?.attributes?.fileName;
-  return fileName ? `${UPLOADS_BASE}/${m.id}/${fileName}` : PLACEHOLDER(220,320,getTitle(m.attributes));
-}
-
-/* ---------- MangaDex API helpers ---------- */
-/*
-  fetchManga(params)
-   - params: string like 'limit=8&order[follows]=desc'
-   - automatically filters status to ongoing/completed and includes cover_art
-*/
+// 🛑 MODIFIED: fetchManga to use simple PROXY_URL prefix
 async function fetchManga(params='limit=8&order[follows]=desc'){
-  const statusFilter = '&status[]=ongoing&status[]=completed';
-  const url = `${API_BASE}/manga?${params}${statusFilter}&includes[]=cover_art`;
-  try {
-    const res = await safeFetch(url);
-    if (!res.ok) throw new Error(`MangaDex: ${res.status} ${res.statusText}`);
-    const json = await res.json();
-    return json.data || [];
-  } catch (err) {
-    console.error('fetchManga error', err);
-    throw err;
-  }
+  const url = `${PROXY_URL}${API_BASE}/manga?${params}&includes[]=cover_art`; 
+  
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('MangaDex error');
+  const json = await res.json();
+  return json.data || [];
 }
 
-/*
-  fetchChapters(mangaId)
-   - returns chapters (translated to en), ordered desc by chapter number
-*/
+// 🛑 MODIFIED: fetchChapters to use simple PROXY_URL prefix
 async function fetchChapters(mangaId){
-  const url = `${API_BASE}/manga/${mangaId}/feed?limit=500&translatedLanguage[]=en&order[chapter]=desc`;
-  try {
-    const res = await safeFetch(url);
-    if (!res.ok) throw new Error(`Chapters fetch failed: ${res.status}`);
-    const json = await res.json();
-    return json.data || [];
-  } catch (err) {
-    console.error('fetchChapters', err);
-    throw err;
-  }
+  // get chapters (translated EN)
+  const url = `${PROXY_URL}${API_BASE}/manga/${mangaId}/feed?limit=500&translatedLanguage[]=en&order[chapter]=desc`; 
+  
+  const res = await fetch(url);
+  if(!res.ok) return [];
+  const json = await res.json();
+  return json.data || [];
 }
 
-/*
-  getAtHome(chapterId)
-   - returns at-home server info with baseUrl and chapter data
-*/
+// 🛑 MODIFIED: getAtHome to use simple PROXY_URL prefix
 async function getAtHome(chapterId){
-  // MangaDex at-home endpoint
-  const url = `${API_BASE}/at-home/server/${chapterId}`;
-  try {
-    const res = await safeFetch(url);
-    if (!res.ok) throw new Error(`At-home fetch failed: ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.error('getAtHome error', err);
-    throw err;
-  }
+  // returns baseUrl and server data for the chapter pages
+  // We MUST include the full URL here, including the protocol (https://)
+  const url = `${PROXY_URL}https://api.mangadex.org/at-home/server/${chapterId}`; 
+  
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('At-home error');
+  return await res.json();
 }
 
-/* ---------- Rendering (re-uses structure from mock) ---------- */
-function showLoader(on=true){ if(!globalLoader) return; if(on) globalLoader.classList.remove('hidden'); else globalLoader.classList.add('hidden'); }
-
-function renderFeatured(list = []) {
-  featuredWrap.innerHTML = '';
-  featuredDots.innerHTML = '';
-  if (!list.length) {
-    featuredWrap.innerHTML = `<div class="featured-empty">No featured manga</div>`;
-    return;
-  }
-  list.forEach((m, i) => {
-    const el = document.createElement('div');
-    el.className = `featured-slide ${i === state.featuredIndex ? 'active' : ''}`;
-    el.dataset.index = i;
-    el.innerHTML = `
-      <img class="featured-cover" width="300" height="420" src="${coverFromRel(m)}" alt="${escapeHtml(getTitle(m.attributes))}">
-      <div class="featured-meta">
-        <h3 class="featured-title">${escapeHtml(getTitle(m.attributes))}</h3>
-        <p class="featured-desc">${truncate(escapeHtml(m.attributes?.description || ''), 140)}</p>
-        <div class="featured-actions">
-          <button class="btn open-reader" data-id="${m.id}">Read</button>
-          <button class="btn bookmark-btn" data-id="${m.id}">${isBookmarked(m.id) ? 'Bookmarked' : 'Bookmark'}</button>
-        </div>
-      </div>
-    `;
-    featuredWrap.appendChild(el);
-
-    const dot = document.createElement('button');
-    dot.className = `dot ${i === state.featuredIndex ? 'on' : ''}`;
-    dot.dataset.index = i;
-    dot.addEventListener('click', () => {
-      state.featuredIndex = i;
-      updateFeaturedActive();
-    });
-    featuredDots.appendChild(dot);
-  });
-
-  qsa('.open-reader').forEach(btn => btn.addEventListener('click', e => openReaderForManga(e.currentTarget.dataset.id)));
-  qsa('.bookmark-btn').forEach(btn => btn.addEventListener('click', e => { toggleBookmark(e.currentTarget.dataset.id); btn.textContent = isBookmarked(e.currentTarget.dataset.id) ? 'Bookmarked' : 'Bookmark'; renderBookmarks(); }));
+/* ---------- Loading helper ---------- */
+function showLoader(on=true){
+  if(on){ globalLoader.classList.remove('hidden'); }
+  else globalLoader.classList.add('hidden');
 }
 
-function updateFeaturedActive() {
-  qsa('.featured-slide').forEach(s => s.classList.remove('active'));
-  qsa('.dot').forEach(d => d.classList.remove('on'));
-  const active = qs(`.featured-slide[data-index="${state.featuredIndex}"]`);
-  const dot = qs(`.dot[data-index="${state.featuredIndex}"]`);
-  if (active) active.classList.add('active');
-  if (dot) dot.classList.add('on');
-}
-
-function renderListToContainer(list, container, small=false) {
-  container.innerHTML = '';
-  list.forEach(m => {
-    const div = document.createElement('div');
-    div.className = `manga-item ${small ? 'small' : ''}`;
-    div.innerHTML = `
-      <img src="${coverFromRel(m)}" alt="${escapeHtml(getTitle(m.attributes))}" width="${small ? 64 : 120}" height="${small ? 90 : 160}">
-      <div class="manga-info">
-        <h4>${escapeHtml(getTitle(m.attributes))}</h4>
-        <div class="manga-meta">${escapeHtml((m.attributes.tags || []).map(t=>t).slice(0,3).join(', '))}</div>
-        <div class="manga-actions">
-          <button class="btn open-reader" data-id="${m.id}">Read</button>
-          <button class="btn bookmark-btn" data-id="${m.id}">${isBookmarked(m.id) ? 'Bookmarked' : 'Bookmark'}</button>
-        </div>
-      </div>
-    `;
-    container.appendChild(div);
-  });
-  qsa('.open-reader').forEach(btn => { btn.removeEventListener('click', openReaderBtnHandler); btn.addEventListener('click', openReaderBtnHandler); });
-  qsa('.bookmark-btn').forEach(btn => { btn.removeEventListener('click', bookmarkBtnHandler); btn.addEventListener('click', bookmarkBtnHandler); });
-}
-function openReaderBtnHandler(e){ openReaderForManga(e.currentTarget.dataset.id); }
-function bookmarkBtnHandler(e){ toggleBookmark(e.currentTarget.dataset.id); e.currentTarget.textContent = isBookmarked(e.currentTarget.dataset.id) ? 'Bookmarked' : 'Bookmark'; renderBookmarks(); }
-
-function renderPopular(list){ renderListToContainer(list, popularList, true); }
-function renderPopularToday(list){ renderListToContainer(list, popularToday, true); }
-function renderLatestGrid(list){
-  latestGrid.innerHTML = '';
-  list.forEach(m => {
-    const div = document.createElement('div');
-    div.className = 'grid-card';
-    div.innerHTML = `
-      <img src="${coverFromRel(m)}" alt="${escapeHtml(getTitle(m.attributes))}" width="140" height="200">
-      <h5>${escapeHtml(getTitle(m.attributes))}</h5>
-      <small>${escapeHtml(m.attributes.status || '')}</small>
-      <div class="card-actions">
-        <button class="btn open-reader" data-id="${m.id}">Read</button>
-        <button class="btn bookmark-btn" data-id="${m.id}">${isBookmarked(m.id) ? 'Bookmarked' : 'Bookmark'}</button>
-      </div>
-    `;
-    latestGrid.appendChild(div);
-  });
-  qsa('.open-reader').forEach(btn => { btn.removeEventListener('click', openReaderBtnHandler); btn.addEventListener('click', openReaderBtnHandler); });
-  qsa('.bookmark-btn').forEach(btn => { btn.removeEventListener('click', bookmarkBtnHandler); btn.addEventListener('click', bookmarkBtnHandler); });
-}
-
-function renderRanking(list){
-  rankList.innerHTML = '';
-  list.forEach((m,i) => {
-    const li = document.createElement('div');
-    li.className = 'rank-row';
-    li.innerHTML = `
-      <span class="rank-pos">${i+1}</span>
-      <img src="${coverFromRel(m)}" alt="${escapeHtml(getTitle(m.attributes))}" width="48" height="72">
-      <div class="rank-info">
-        <strong>${escapeHtml(getTitle(m.attributes))}</strong>
-        <div class="rank-tags">${escapeHtml((m.attributes.tags||[]).slice(0,2).join(', '))}</div>
-      </div>
-      <button class="btn open-reader" data-id="${m.id}">Read</button>
-    `;
-    rankList.appendChild(li);
-  });
-  qsa('.open-reader').forEach(btn => { btn.removeEventListener('click', openReaderBtnHandler); btn.addEventListener('click', openReaderBtnHandler); });
-}
-
-/* ---------- Bookmarks ---------- */
-function isBookmarked(mangaId){ return state.bookmarks.includes(mangaId); }
-function toggleBookmark(mangaId){
-  if(isBookmarked(mangaId)) state.bookmarks = state.bookmarks.filter(id => id !== mangaId);
-  else state.bookmarks.push(mangaId);
-  saveBookmarks();
-}
-function renderBookmarks(){
-  // Try to render with cached metadata (we might have partial results); otherwise show IDs
-  bookmarksList.innerHTML = '';
-  if (!state.bookmarks.length) { bookmarksList.innerHTML = '<div class="empty">No bookmarks yet — add some!</div>'; return; }
-  state.bookmarks.forEach(id => {
-    // attempt to find recently fetched manga in DOM data attributes
-    const cachedEl = document.querySelector(`[data-manga-id="${id}"]`);
-    // fallback minimal view
-    const div = document.createElement('div');
-    div.className = 'bookmark-row';
-    div.innerHTML = `
-      <img src="${PLACEHOLDER(48,72,'Cover')}" width="48" height="72" alt="cover">
-      <div class="bk-info"><strong>${escapeHtml(id)}</strong></div>
-      <div class="bk-actions">
-        <button class="btn open-reader" data-id="${id}">Read</button>
-        <button class="btn remove-bk" data-id="${id}">Remove</button>
-      </div>
-    `;
-    bookmarksList.appendChild(div);
-  });
-  qsa('.open-reader').forEach(btn => btn.addEventListener('click', e => openReaderForManga(e.currentTarget.dataset.id)));
-  qsa('.remove-bk').forEach(btn => btn.addEventListener('click', e => { const id = e.currentTarget.dataset.id; state.bookmarks = state.bookmarks.filter(x => x !== id); saveBookmarks(); renderBookmarks(); }));
-}
-
-/* ---------- Search (calls MangaDex search) ---------- */
-async function doSearch(query=''){
-  const q = String(query || '').trim();
-  if (!q) { if (searchResults) searchResults.innerHTML = '<div class="hint">Type to search by title...</div>'; return; }
-  showLoader(true);
-  try {
-    // manga search endpoint: /manga?title=<q>&includes[]=cover_art
-    const params = `limit=24&title=${encodeURIComponent(q)}&includes[]=cover_art`;
-    const results = await fetchManga(params);
-    if (!results.length) searchResults.innerHTML = `<div class="empty">No results for "${escapeHtml(q)}"</div>`;
-    else renderListToContainer(results, searchResults, false);
-  } catch (err) {
-    console.error('search error', err);
-    searchResults.innerHTML = `<div class="empty">Search failed — try again later.</div>`;
-  } finally { showLoader(false); }
-}
-
-/* ---------- Reader: open manga -> chapters -> open chapter -> load pages from at-home server ---------- */
-async function openReaderForManga(mangaId){
-  showLoader(true);
-  try {
-    // fetch manga metadata (single manga by id) so we can display title + covers
-    const mangaUrl = `${API_BASE}/manga/${mangaId}?includes[]=cover_art`;
-    const res = await safeFetch(mangaUrl);
-    if (!res.ok) throw new Error('Failed to fetch manga details');
-    const json = await res.json();
-    const manga = json.data;
-    if (!manga) throw new Error('Manga not found');
-
-    // fetch chapters (cached)
-    if (!state.chaptersCache[mangaId]) {
-      try {
-        const ch = await fetchChapters(mangaId);
-        state.chaptersCache[mangaId] = ch;
-      } catch(e) {
-        console.warn('Chapter fetch failed, continuing with empty chapters', e);
-        state.chaptersCache[mangaId] = [];
-      }
-    }
-    const chapters = state.chaptersCache[mangaId];
-    // choose latest available chapter with a chapter number or latest by upload
-    const chosen = chapters.length ? chapters[0] : null;
-    if (!chosen) {
-      // If no chapters, show a placeholder reader with manga info
-      alert('No chapters available for this manga.');
-      return;
-    }
-    await openChapterReader(manga, chosen);
-  } catch (err) {
-    console.error('openReaderForManga error', err);
-    alert('Failed to open reader. See console for details.');
-  } finally { showLoader(false); }
-}
-
-async function openChapterReader(manga, chapter){
-  // chapter is a MangaDex chapter object
-  // chapter.id will be the id used by at-home endpoint
-  const chapterId = chapter.id;
-  try {
-    // check cache
-    let ah = state.atHomeCache[chapterId];
-    if (!ah) {
-      ah = await getAtHome(chapterId);
-      state.atHomeCache[chapterId] = ah;
-    }
-    // at-home payload schema: { baseUrl: '', chapter: {hash, data: [<file1.jpg>, ...] } }
-    const baseUrl = ah.baseUrl;
-    const chapterData = ah.chapter; // contains hash and data (array of filenames)
-    const serverUrls = buildPageUrls(baseUrl, chapterData);
-
-    // Render reader modal with pages
-    renderReaderModal(getTitle(manga.attributes), chapter, serverUrls);
-  } catch (err) {
-    console.error('openChapterReader', err);
-    alert('Failed to load chapter pages. It might be a CORS or network issue.');
-  }
-}
-
-function buildPageUrls(baseUrl, chapterData) {
-  // baseUrl example: https://uploads.mangadex.org
-  // chapterData contains `hash` and `data` array (page filenames)
-  if (!baseUrl || !chapterData) return [];
-  const hash = chapterData.hash;
-  const pages = chapterData.data || [];
-  // pages are served as `${baseUrl}/data/${hash}/${filename}`
-  return pages.map(fn => `${baseUrl}/data/${hash}/${fn}`);
-}
-
-function renderReaderModal(mangaTitle, chapter, pageUrls){
-  // clear and show modal
-  readerModal.innerHTML = '';
-  readerModal.classList.remove('hidden');
-
-  const titleEl = document.createElement('div');
-  titleEl.className = 'reader-header';
-  titleEl.innerHTML = `
-    <h3 id="readerTitleText">${escapeHtml(mangaTitle)} — ${escapeHtml(chapter.attributes?.title || ('#' + chapter.attributes?.chapter || ''))}</h3>
-    <button id="readerCloseBtn" class="btn">Close</button>
-  `;
-  readerModal.appendChild(titleEl);
-
-  const pagesEl = document.createElement('div');
-  pagesEl.className = 'reader-pages';
-  pageUrls.forEach((url, idx) => {
-    const p = document.createElement('div');
-    p.className = 'reader-page';
-    p.innerHTML = `<img src="${url}" alt="${escapeHtml(`${mangaTitle} • Page ${idx+1}`)}">`;
-    pagesEl.appendChild(p);
-  });
-  readerModal.appendChild(pagesEl);
-
-  const controls = document.createElement('div');
-  controls.className = 'reader-controls';
-  controls.innerHTML = `
-    <button id="pagePrev" class="btn">Prev</button>
-    <span id="pageIndicator">1 / ${pageUrls.length}</span>
-    <button id="pageNext" class="btn">Next</button>
-  `;
-  readerModal.appendChild(controls);
-
-  let currentPage = 1;
-  const pageNodes = Array.from(pagesEl.children);
-  function updatePageVisibility(){
-    pageNodes.forEach((pn, idx) => pn.style.display = (idx === currentPage-1) ? 'block' : 'none');
-    const indicator = qs('#pageIndicator'); if (indicator) indicator.textContent = `${currentPage} / ${pageUrls.length}`;
-  }
-  updatePageVisibility();
-
-  qs('#pagePrev').addEventListener('click', () => { if (currentPage > 1) currentPage--; updatePageVisibility(); });
-  qs('#pageNext').addEventListener('click', () => { if (currentPage < pageUrls.length) currentPage++; updatePageVisibility(); });
-  qs('#readerCloseBtn').addEventListener('click', () => readerModal.classList.add('hidden'));
-}
-
-/* ---------- Loading sections (real data) ---------- */
+/* ---------- Featured carousel ---------- */
 async function loadFeatured(){
-  showLoader(true);
-  try {
-    // featured: top recently updated (4)
-    const list = await fetchManga('limit=8&order[updatedAt]=desc');
-    const featured = list.slice(0,4);
-    renderFeatured(featured);
-    // rotate
-    setInterval(()=>{ state.featuredIndex = (state.featuredIndex+1) % Math.max(1, featured.length); updateFeaturedActive(); }, 5000);
-  } catch (err) {
-    console.error('loadFeatured', err);
-    // fallback UI
-    featuredWrap.innerHTML = '<div class="empty">Failed to load featured - check CORS/proxy.</div>';
-  } finally { showLoader(false); }
+  try{
+    const list = await fetchManga('limit=6&order[follows]=desc');
+    featuredList = list;
+    if(!list.length) return;
+    currentFeaturedIndex = 0;
+    renderFeatured(0);
+    renderDots(list.length);
+    setInterval(()=>{ currentFeaturedIndex = (currentFeaturedIndex+1)%featuredList.length; renderFeatured(currentFeaturedIndex); updateDots(); }, 6000);
+  }catch(e){
+    console.error('featured', e);
+  }
+}
+function renderFeatured(i){
+  const m = featuredList[i];
+  heroTitle.textContent = getTitle(m.attributes).toUpperCase();
+  const desc = m.attributes.description?.en || Object.values(m.attributes.description || {})[0] || '';
+  heroSummary.textContent = desc.length > 320 ? desc.slice(0,320)+'…' : desc;
+  heroMeta.textContent = `${(m.attributes.publicationDemographic || '').toUpperCase()} • ${ (m.attributes.tags||[]).slice(0,3).map(t=>t.attributes?.name?.en || Object.values(t.attributes?.name||{})[0]).filter(Boolean).join(', ') || m.attributes.status || '—' }`;
+  heroRating.textContent = '★';
+  heroCover.src = coverFromRel(m);
+  // buttons
+  qs('#readHero').onclick = ()=> openReaderForManga(m.id);
+  bookmarkHeroBtn.onclick = ()=> toggleBookmark({id: m.id, title: getTitle(m.attributes), cover: coverFromRel(m)});
+}
+function renderDots(n){
+  carouselDots.innerHTML = '';
+  for(let j=0;j<n;j++){
+    const b=document.createElement('button');
+    if(j===currentFeaturedIndex) b.classList.add('active');
+    b.onclick = ()=>{ currentFeaturedIndex=j; renderFeatured(j); updateDots(); };
+    carouselDots.appendChild(b);
+  }
+}
+function updateDots(){
+  [...carouselDots.children].forEach((el,idx)=> el.classList.toggle('active', idx===currentFeaturedIndex));
 }
 
+/* ---------- Popular list ---------- */
 async function loadPopularList(){
-  showLoader(true);
-  try {
-    const list = await fetchManga('limit=8&order[follows]=desc');
-    renderPopular(list);
-  } catch (err) {
-    console.error('loadPopularList', err);
-    popularList.innerHTML = '<div class="empty">Failed to load popular list.</div>';
-  } finally { showLoader(false); }
+  try{
+    const list = await fetchManga('limit=8&order[follows]=desc');
+    popularList.innerHTML = '';
+    list.forEach(m => {
+      const item = document.createElement('div');
+      item.className = 'pop-item';
+      item.innerHTML = `
+        <img src="${coverFromRel(m)}" alt="">
+        <div>
+          <strong>${getTitle(m.attributes)}</strong>
+          <div style="color:var(--muted);font-size:13px">${m.attributes.status || ''}</div>
+        </div>
+      `;
+      item.onclick = ()=> openTitle(m.id);
+      popularList.appendChild(item);
+    });
+  }catch(e){ console.error('popular list', e); }
 }
 
+/* ---------- Popular Today (latest updated) ---------- */
 async function loadPopularToday(){
-  showLoader(true);
-  try {
-    const list = await fetchManga('limit=8&order[updatedAt]=desc');
-    renderPopularToday(list);
-  } catch (err) {
-    console.error('loadPopularToday', err);
-    popularToday.innerHTML = '<div class="empty">Failed to load popular today.</div>';
-  } finally { showLoader(false); }
+  try{
+    const list = await fetchManga('limit=8&order[updatedAt]=desc');
+    popularToday.innerHTML = '';
+    list.forEach(m=>{
+      const el = document.createElement('div');
+      el.className = 'h-card';
+      el.innerHTML = `<img src="${coverFromRel(m)}" alt=""><div style="padding:8px;font-weight:700">${getTitle(m.attributes)}</div>`;
+      el.onclick = ()=> openTitle(m.id);
+      popularToday.appendChild(el);
+    });
+  }catch(e){ console.error('popularToday', e); }
 }
 
+/* ---------- Latest grid ---------- */
 async function loadLatestGrid(){
-  showLoader(true);
-  try {
-    const list = await fetchManga('limit=18&order[createdAt]=desc');
-    renderLatestGrid(list);
-  } catch (err) {
-    console.error('loadLatestGrid', err);
-    latestGrid.innerHTML = '<div class="empty">Failed to load latest.</div>';
-  } finally { showLoader(false); }
+  try{
+    const list = await fetchManga('limit=18&order[createdAt]=desc');
+    latestGrid.innerHTML = '';
+    list.forEach(m=>{
+      const a = document.createElement('article');
+      a.className = 'card';
+      a.innerHTML = `<img src="${coverFromRel(m)}" alt=""><div class="title">${getTitle(m.attributes)} <span class="type">${(m.attributes.publicationDemographic||'MANGA').toUpperCase()}</span></div>`;
+      a.onclick = ()=> openReaderForManga(m.id);
+      latestGrid.appendChild(a);
+    });
+  }catch(e){ console.error('latest', e); }
 }
 
+/* ---------- Ranking ---------- */
 async function loadRanking(){
-  showLoader(true);
-  try {
-    const list = await fetchManga('limit=10&order[follows]=desc');
-    renderRanking(list);
-  } catch (err) {
-    console.error('loadRanking', err);
-    rankList.innerHTML = '<div class="empty">Failed to load ranking.</div>';
-  } finally { showLoader(false); }
+  try{
+    const list = await fetchManga('limit=10&order[follows]=desc');
+    rankList.innerHTML = '';
+    list.forEach((m,i)=>{
+      const li = document.createElement('li');
+      li.innerHTML = `<div class="rank-num">${i+1}</div><img class="rank-thumb" src="${coverFromRel(m)}"><div style="flex:1"><strong>${getTitle(m.attributes)}</strong><div style="color:var(--muted);font-size:13px">${m.attributes.status || ''}</div></div>`;
+      li.onclick = ()=> openTitle(m.id);
+      rankList.appendChild(li);
+    });
+  }catch(e){ console.error('rank', e); }
 }
 
-/* ---------- UI wiring ---------- */
-function setupEventHandlers(){
-  if (searchInput && searchButton) {
-    searchButton.addEventListener('click', () => doSearch(searchInput.value));
-    searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(searchInput.value); });
-  }
-  if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
-  else document.body.addEventListener('dblclick', toggleTheme); // convenience
-  if (readerClose) readerClose.addEventListener('click', () => readerModal.classList.add('hidden'));
+/* ---------- Reader logic (core) ---------- */
+async function openReaderForManga(mangaId){
+  showReaderModal(true);
+  showReaderLoading(true);
+  readerPages.innerHTML = '';
+  try{
+    // fetch chapters for manga (EN)
+    const chapters = await fetchChapters(mangaId);
+    if(!chapters.length){
+      readerPages.innerHTML = '<div class="loader">No chapters available (EN)</div>';
+      showReaderLoading(false);
+      return;
+    }
+    // store chapters sorted by numeric chapter desc (we got that already)
+    currentReader.mangaId = mangaId;
+    currentReader.chapters = chapters;
+    // choose most recent chapter (0)
+    currentReader.chapterIndex = 0;
+    await loadChapterByIndex(currentReader.chapterIndex);
+  }catch(err){
+    console.error('openReader', err);
+    readerPages.innerHTML = '<div class="loader">Reader error</div>';
+  } finally {
+    showReaderLoading(false);
+  }
 }
 
-/* ---------- Init ---------- */
-async function initLiveApp(){
-  loadTheme();
-  setupEventHandlers();
-  renderBookmarks(); // show any saved bookmarks (IDs)
-  // Kick off loaders in parallel but keep UI responsive
-  loadFeatured();
-  loadPopularList();
-  loadPopularToday();
-  loadLatestGrid();
-  loadRanking();
+async function loadChapterByIndex(index){
+  showReaderLoading(true);
+  readerPages.innerHTML = '';
+  try{
+    const chapter = currentReader.chapters[index];
+    const chapterId = chapter.id;
+    // fetch at-home server
+    const at = await getAtHome(chapterId);
+    const baseUrl = at.baseUrl;
+    const data = at.chapter.data; // array of filenames
+    const hash = at.chapter.hash; // sometimes there is hash; at-home returns {chapter: {hash, data, dataSaver?}}
+    // build image urls: baseUrl + /data/{hash}/{fileName}
+    // Modern: baseUrl + '/data/' + at.chapter.hash + '/' + file
+    const fileHash = at.chapter.hash;
+    currentReader.baseUrl = baseUrl;
+    currentReader.pages = (at.chapter.data || at.chapter.dataSaver || []).slice();
+    readerPages.innerHTML = '';
+    if(!currentReader.pages.length){
+      readerPages.innerHTML = '<div class="loader">No pages found for this chapter.</div>';
+      return;
+    }
+    // render images (vertical scroll)
+    currentReader.pages.forEach((fn, idx)=>{
+      const img = document.createElement('img');
+      // NOTE: Chapter images should usually load directly from the At-Home server's baseUrl
+      img.src = `${baseUrl}/data/${fileHash}/${fn}`;
+      img.alt = `Page ${idx+1}`;
+      img.loading = 'lazy';
+      img.className = 'reader-img';
+      readerPages.appendChild(img);
+    });
+    // update prev/next chapter buttons
+    prevChapBtn.disabled = index <= 0;
+    nextChapBtn.disabled = index >= currentReader.chapters.length - 1;
+    // scroll to top
+    readerPages.scrollTop = 0;
+    // save bookmark resume
+    saveResume(currentReader.mangaId, currentReader.chapters[index].id, 1);
+  }catch(err){
+    console.error('loadChapter', err);
+    readerPages.innerHTML = '<div class="loader">Failed loading chapter pages (CORS or missing data)</div>';
+  } finally{
+    showReaderLoading(false);
+  }
 }
 
-/* ---------- Start ---------- */
-initLiveApp();
+prevChapBtn.addEventListener('click', async ()=>{
+  if(currentReader.chapterIndex > 0){
+    currentReader.chapterIndex--;
+    await loadChapterByIndex(currentReader.chapterIndex);
+  }
+});
+nextChapBtn.addEventListener('click', async ()=>{
+  if(currentReader.chapterIndex < currentReader.chapters.length - 1){
+    currentReader.chapterIndex++;
+    await loadChapterByIndex(currentReader.chapterIndex);
+  }
+});
+closeReaderBtn.addEventListener('click', ()=> showReaderModal(false));
 
-/* ---------- Minimal styles (convenience) ---------- */
-(function attachMinimalStyles(){
-  if (document.getElementById('live-app-styles')) return;
-  const css = `
-    .hidden{display:none;}
-    .featured-slide{display:flex;gap:12px;align-items:center;padding:12px;border-radius:8px;}
-    .featured-slide img{border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,0.12);}
-    .featured-meta{max-width:520px;}
-    .manga-item{display:flex;gap:12px;align-items:center;padding:8px;border-bottom:1px solid #eee;}
-    .manga-item.small img{width:64px;height:90px;}
-    .grid-card{display:inline-block;width:160px;margin:8px;padding:8px;text-align:center;border:1px solid #eee;border-radius:6px;}
-    .rank-row{display:flex;align-items:center;gap:12px;padding:6px;border-bottom:1px solid #f0f0f0;}
-    .btn{padding:6px 10px;border-radius:6px;border:0;background:#2b6cb0;color:#fff;cursor:pointer}
-    .btn:hover{opacity:.95}
-    .reader-pages{max-width:760px;margin:12px auto;text-align:center;}
-    .reader-page img{max-width:100%;height:auto;border-radius:6px;}
-    .reader-controls{display:flex;justify-content:center;gap:12px;margin:12px;}
-    #readerModal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;z-index:9999;padding:12px;border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,0.25);max-height:90vh;overflow:auto;}
-    .dark #readerModal{background:#111;color:#eee}
-    .bookmark-row,.bk-actions{display:flex;align-items:center;gap:8px}
-    .hint,.empty{color:#666;padding:12px}
-  `;
-  const s = document.createElement('style');
-  s.id = 'live-app-styles';
-  s.appendChild(document.createTextNode(css));
-  document.head.appendChild(s);
-})();
+/* keyboard navigation */
+document.addEventListener('keydown', (e)=>{
+  if(readerModal.classList.contains('show')){
+    if(e.key === 'ArrowLeft') prevChapBtn.click();
+    if(e.key === 'ArrowRight') nextChapBtn.click();
+    if(e.key === 'Escape') closeReaderBtn.click();
+  }
+});
 
-/* ---------- Notes / Troubleshooting ----------
-1) CORS: MangaDex prevents direct browser requests in many contexts. If you see CORS errors in the console,
-   set CORS_PROXY to a proxy that forwards requests (self-hosted is recommended for production).
-   Example small proxy: a tiny Node/Express server that forwards requests with proper headers.
+/* ---------- Bookmarks (localStorage) ---------- */
+function loadBookmarks(){
+  const raw = localStorage.getItem('mv_bookmarks') || '[]';
+  let arr = [];
+  try{ arr = JSON.parse(raw); }catch(e){ arr = []; }
+  renderBookmarks(arr);
+  return arr;
+}
+function renderBookmarks(list){
+  bookmarkListNode.innerHTML = '';
+  if(!list.length){ bookmarkListNode.innerHTML = '<small>No bookmarks yet.</small>'; return; }
+  list.forEach(b=>{
+    const div = document.createElement('div');
+    div.className = 'bm-item';
+    div.innerHTML = `<img src="${b.cover}" alt=""><div style="flex:1"><strong>${b.title}</strong><div style="color:var(--muted);font-size:13px">Last: ${b.lastChapter || '—'}</div></div><div><button class="btn small" data-id="${b.id}">Read</button></div>`;
+    div.querySelector('button').onclick = ()=> openReaderForManga(b.id);
+    bookmarkListNode.appendChild(div);
+  });
+}
+function toggleBookmark(item){
+  const raw = localStorage.getItem('mv_bookmarks') || '[]';
+  let arr = [];
+  try{ arr = JSON.parse(raw); }catch(e){ arr = []; }
+  const idx = arr.findIndex(x => x.id === item.id);
+  if(idx >= 0){
+    arr.splice(idx,1);
+  } else {
+    arr.unshift({ id: item.id, title: item.title, cover: coverFromRel(item), lastChapter: null });
+  }
+  localStorage.setItem('mv_bookmarks', JSON.stringify(arr));
+  renderBookmarks(arr);
+}
 
-2) Rate limits: MangaDex may throttle heavy requests. Avoid polling; fetch on-demand.
+/* save resume info */
+function saveResume(mangaId, chapterId, pageIndex){
+  const raw = localStorage.getItem('mv_resume') || '{}';
+  let obj = {};
+  try{ obj = JSON.parse(raw); }catch(e){ obj = {}; }
+  obj[mangaId] = { chapterId, pageIndex, updatedAt: Date.now() };
+  localStorage.setItem('mv_resume', JSON.stringify(obj));
+}
 
-3) Fallback: if you want, wrap fetch errors to fallback to app.mock.js mock data for offline demo purposes.
+/* ---------- Reader modal show/hide ---------- */
+function showReaderModal(show){
+  if(show){
+    readerModal.classList.add('show');
+    readerModal.setAttribute('aria-hidden','false');
+  } else {
+    readerModal.classList.remove('show');
+    readerModal.setAttribute('aria-hidden','true');
+  }
+}
+function showReaderLoading(on){
+  readerLoading.style.display = on ? 'block' : 'none';
+}
 
-4) Security: Be careful exposing an open CORS proxy publicly; prefer a limited/secure proxy.
+/* ---------- Title open helper ---------- */
+function openTitle(mangaId){
+  window.open(mdTitleUrl(mangaId),'_blank');
+}
+// mdTitleUrl is already defined earlier in the Helpers section
 
------------------------------------------------ */
+/* ---------- Search ---------- */
+searchBtn.addEventListener('click', ()=> doSearch(searchInput.value.trim()));
+searchInput.addEventListener('keydown', (e)=> { if(e.key === 'Enter') doSearch(searchInput.value.trim()); });
 
+async function doSearch(q){
+  if(!q) return alert('Type a title to search.');
+  try{
+    showLoader(true);
+    // FIX: Using the already defined fetchManga instead of the undefined fetchMangaList
+    const list = await fetchManga(`limit=24&title=${encodeURIComponent(q)}`);
+    latestGrid.innerHTML = '';
+    if(!list.length){ latestGrid.innerHTML = '<div style="padding:16px;color:var(--muted)">No results</div>'; return; }
+    list.forEach(m=>{
+      const card = document.createElement('article');
+      card.className = 'card';
+      card.innerHTML = `<img src="${coverFromRel(m)}"><div class="title">${getTitle(m.attributes)}<span class="type">${(m.attributes.publicationDemographic || 'MANGA').toUpperCase()}</span></div>`;
+      card.onclick = ()=> openReaderForManga(m.id);
+      latestGrid.appendChild(card);
+    });
+  }catch(e){ console.error('search', e); alert('Search error'); }
+  finally{ showLoader(false); }
+}
+
+/* FIX: Removed duplicate/conflicting definitions for fetchManga and fetchMangaList */
+
+/* ---------- Theme toggle ---------- */
+const root = document.documentElement;
+themeToggle.addEventListener('click', ()=>{
+  document.body.classList.toggle('light');
+  // Simple theme behavior: flip background and accent color
+  // NOTE: Ideally, set these in CSS under a .light class and remove this JS style manipulation
+  if(document.body.classList.contains('light')){
+    root.style.setProperty('--bg','#ffffff');
+    root.style.setProperty('--panel','#f7f7fb');
+    root.style.setProperty('--muted','#6b7280');
+  } else {
+    root.style.removeProperty('--bg');
+    root.style.removeProperty('--panel');
+    root.style.removeProperty('--muted');
+  }
+});
+
+/* ---------- Login modal (mock) ---------- */
+openLoginBtn.addEventListener('click', ()=> { loginModal.classList.add('show'); loginModal.setAttribute('aria-hidden','false'); });
+closeLoginBtn.addEventListener('click', ()=> { loginModal.classList.remove('show'); loginModal.setAttribute('aria-hidden','true'); });
+qs('#loginCancel').addEventListener('click', ()=> { closeLoginBtn.click(); });
+
+loginForm.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  loginMsg.textContent = 'Demo login: not connected to server. This is UI-only.';
+  setTimeout(()=>{ loginMsg.textContent = 'Logged in (demo)'; closeLoginBtn.click(); }, 800);
+});
+
+/* ---------- Page init ---------- */
+async function init(){
+  try{
+    showLoader(true);
+    await Promise.all([
+      loadFeatured(),
+      loadPopularList(),
+      loadPopularToday(),
+      loadLatestGrid(),
+      loadRanking()
+    ]);
+    // bookmarks
+    loadBookmarks();
+  }catch(e){ console.error('init', e); }
+  finally{ showLoader(false); }
+}
+
+/* FIX: Removed duplicate definition for coverFromRel */
+/* FIX: Removed duplicate definitions for fetchChapters and getAtHome */
+
+/* ---------- kick off ---------- */
+init();
